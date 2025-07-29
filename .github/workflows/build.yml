@@ -89,14 +89,14 @@ jobs:
       #     GO_VERSION=$(yq eval '.versions.golang' docker/versions.yaml)
       #     echo "go-version=${GO_VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          # go-version: ${{ steps.go-version.outputs.go-version }}
-          go-version: '1.23.0'
+      # - name: Set up Go
+      #   uses: actions/setup-go@v4
+      #   with:
+      #     # go-version: ${{ steps.go-version.outputs.go-version }}
+      #     go-version: '1.23.0'
 
-      - name: Install dependencies
-        run: go mod tidy
+      # - name: Install dependencies
+      #   run: go mod tidy
 
       - name: Generate Dockerfiles
         run: |
@@ -131,7 +131,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./docker/loong64-production.gen.dockerfile
+          # file: ./docker/loong64-production.gen.dockerfile
+          file: ./docker/loong64/dockerfile
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
