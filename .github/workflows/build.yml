@@ -1,0 +1,164 @@
+name: Build and Push Sandbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 20 * * *'
+
+concurrency:
+  group: build-push-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      build: ${{ steps.check-build.outputs.build }}
+    steps:
+      - name: Check Version
+        id: get-version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version=$(curl -s 'https://api.github.com/repos/langgenius/dify-sandbox/releases/latest' | jq -r ".tag_name")
+          fi
+          echo "Current Version: ${version}"
+          if [ -z "${version}" ] || [ "${version}" == "null" ]; then
+            echo "Failed to get version"
+            exit 1
+          fi
+          echo "version=${version}" >> $GITHUB_ENV
+          echo "version=${version}" >> $GITHUB_OUTPUT
+
+      - name: Check Build
+        id: check-build
+        run: |
+          gh release view ${version} -R ${{ github.repository }} >/dev/null 2>&1 || echo "build=1" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.build == '1'
+    env:
+      version: ${{ needs.check.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - service_name: "build-sandbox-loong64"
+            image_name_env: "langgenius/dify-sandbox"
+            context: "sandbox"
+            platform: linux/loong64
+
+    steps:
+      - name: Check Version
+        run: |
+          echo "Current Version: ${version}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: langgenius/dify-sandbox
+          ref: ${{ env.version }}
+
+      # - name: Install yq for version configuration
+      #   run: |
+      #     ARCH=$(uname -m)
+      #     if [ "$ARCH" = "x86_64" ]; then
+      #       YQ_ARCH="amd64"
+      #     elif [ "$ARCH" = "aarch64" ]; then
+      #       YQ_ARCH="arm64"
+      #     else
+      #       echo "Unsupported architecture: $ARCH"
+      #       exit 1
+      #     fi
+      #     sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${YQ_ARCH}
+      #     sudo chmod +x /usr/local/bin/yq
+
+      # - name: Read Go version from configuration
+      #   id: go-version
+      #   run: |
+      #     GO_VERSION=$(yq eval '.versions.golang' docker/versions.yaml)
+      #     echo "go-version=${GO_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          # go-version: ${{ steps.go-version.outputs.go-version }}
+          go-version: '1.23.0'
+
+      - name: Install dependencies
+        run: go mod tidy
+
+      - name: Generate Dockerfiles
+        run: |
+          # cd docker
+          # ./generate.sh production loong64
+          wget -qO - https://github.com/loong64/dify-sandbox/raw/refs/heads/main/0001-feat-add-loongarch64-platform-support.patch | git apply
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Build Binary
+        run: |
+          chmod +x ./build/build_loong64.sh
+          docker run --rm \
+            --platform linux/loong64 \
+            -v $(pwd):/app \
+            -w /app \
+            ghcr.io/loong64/golang:1.23 \
+            bash -c "apt-get update && apt-get install -y pkg-config gcc libseccomp-dev && ./build/build_loong64.sh"
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/loong64-production.gen.dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name_env }}:${{ env.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name_env }}:latest
+          outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [ check, build ]
+    if: needs.check.outputs.build == '1'
+    env:
+      version: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Check Version
+        run: |
+          echo "Current Version: ${version}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.version }}
+          tag_name: ${{ env.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

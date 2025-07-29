@@ -1,0 +1,325 @@
+From 717570876619672f2d5c7fbbf7a0b891cd9c2976 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=90=B4=E5=B0=8F=E7=99=BD?= <296015668@qq.com>
+Date: Tue, 29 Jul 2025 10:47:32 +0800
+Subject: [PATCH] feat: add loongarch64 platform support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: 吴小白 <296015668@qq.com>
+---
+ build/build_loong64.sh                        | 12 ++++
+ docker/loong64-test/dockerfile                | 63 +++++++++++++++++++
+ docker/loong64/dockerfile                     | 38 +++++++++++
+ internal/core/lib/seccomp_syscall_loong64.go  |  9 +++
+ internal/static/config_default_loong64.go     | 19 ++++++
+ .../static/nodejs_syscall/syscalls_loong64.go | 44 +++++++++++++
+ .../static/python_syscall/syscalls_loong64.go | 56 +++++++++++++++++
+ tests/integration_tests/conf/config.yaml      |  1 +
+ 8 files changed, 242 insertions(+)
+ create mode 100644 build/build_loong64.sh
+ create mode 100644 docker/loong64-test/dockerfile
+ create mode 100644 docker/loong64/dockerfile
+ create mode 100644 internal/core/lib/seccomp_syscall_loong64.go
+ create mode 100644 internal/static/config_default_loong64.go
+ create mode 100644 internal/static/nodejs_syscall/syscalls_loong64.go
+ create mode 100644 internal/static/python_syscall/syscalls_loong64.go
+
+diff --git a/build/build_loong64.sh b/build/build_loong64.sh
+new file mode 100644
+index 0000000..3c0c9f4
+--- /dev/null
++++ b/build/build_loong64.sh
+@@ -0,0 +1,12 @@
++rm -f internal/core/runner/python/python.so
++rm -f internal/core/runner/nodejs/nodejs.so
++rm -f /tmp/sandbox-python/python.so
++rm -f /tmp/sandbox-nodejs/nodejs.so
++echo "Building Python lib"
++CGO_ENABLED=1 GOOS=linux GOARCH=loong64 go build -o internal/core/runner/python/python.so -buildmode=c-shared -ldflags="-s -w" cmd/lib/python/main.go &&
++echo "Building Nodejs lib" &&
++CGO_ENABLED=1 GOOS=linux GOARCH=loong64 go build -o internal/core/runner/nodejs/nodejs.so -buildmode=c-shared -ldflags="-s -w" cmd/lib/nodejs/main.go &&
++echo "Building main" &&
++GOOS=linux GOARCH=loong64 go build -o main -ldflags="-s -w" cmd/server/main.go
++echo "Building env"
++GOOS=linux GOARCH=loong64 go build -o env -ldflags="-s -w" cmd/dependencies/init.go
+diff --git a/docker/loong64-test/dockerfile b/docker/loong64-test/dockerfile
+new file mode 100644
+index 0000000..b02b154
+--- /dev/null
++++ b/docker/loong64-test/dockerfile
+@@ -0,0 +1,63 @@
++FROM ghcr.io/loong64/golang:1.23 AS builder
++
++COPY . /app
++WORKDIR /app
++
++# if you located in China, you can use aliyun mirror to speed up
++# && echo "deb http://mirrors.aliyun.com/debian testing main" > /etc/apt/sources.list
++
++# install dependencies and build binary
++RUN apt-get update && apt-get install -y pkg-config gcc libseccomp-dev && go mod tidy && bash ./build/build_loong64.sh
++
++FROM ghcr.io/loong64/python:3.10-slim-trixie as tester
++
++# if you located in China, you can use aliyun mirror to speed up
++# && echo "deb http://mirrors.aliyun.com/debian testing main" > /etc/apt/sources.list
++
++# install system dependencies
++RUN apt-get update \
++    && apt-get install -y --no-install-recommends \
++       pkg-config \
++       libseccomp-dev \
++       wget \
++       curl \
++       xz-utils \
++       zlib1g \
++       expat \
++       perl \
++       libsqlite3-0 \
++    && apt-get clean \
++    && rm -rf /var/lib/apt/lists/*
++
++# workdir
++WORKDIR /app
++
++# checkout
++COPY . /app
++
++# copy binary and env from builder
++COPY --from=builder /app/internal/core/runner/python/python.so /app/internal/core/runner/python/python.so
++COPY --from=builder /app/internal/core/runner/nodejs/nodejs.so /app/internal/core/runner/nodejs/nodejs.so
++
++# copy test config file
++COPY conf/config.yaml /conf/config.yaml
++# copy python dependencies
++COPY dependencies/python-requirements.txt /dependencies/python-requirements.txt
++
++# install python dependencies
++RUN pip3 install --no-cache-dir httpx==0.27.2 requests==2.32.3 jinja2==3.0.3 PySocks httpx[socks] -i https://gitlab.com/api/v4/projects/65746188/packages/pypi/simple
++
++# install node
++RUN wget -O /opt/node-v20.11.1-linux-loong64.tar.xz https://github.com/loong64/node/releases/download/v20.11.1/node-v20.11.1-linux-loong64.tar.xz \
++    && tar -xvf /opt/node-v20.11.1-linux-loong64.tar.xz -C /opt \
++    && ln -s /opt/node-v20.11.1-linux-loong64/bin/node /usr/local/bin/node \
++    && rm -f /opt/node-v20.11.1-linux-loong64.tar.xz
++
++# install golang 1.23.9
++RUN wget https://golang.org/dl/go1.23.9.linux-loong64.tar.gz \
++    && tar -C /usr/local -xzf go1.23.9.linux-loong64.tar.gz \
++    && ln -s /usr/local/go/bin/go /usr/local/bin/go \
++    && rm -f go1.23.9.linux-loong64.tar.gz
++
++# run test
++RUN go test -v ./tests/integration_tests/...
+diff --git a/docker/loong64/dockerfile b/docker/loong64/dockerfile
+new file mode 100644
+index 0000000..9f0babd
+--- /dev/null
++++ b/docker/loong64/dockerfile
+@@ -0,0 +1,38 @@
++FROM ghcr.io/loong64/python:3.10-slim-trixie
++
++# if you located in China, you can use aliyun mirror to speed up
++# && echo "deb http://mirrors.aliyun.com/debian testing main" > /etc/apt/sources.list
++RUN apt-get update \
++    && apt-get install -y --no-install-recommends \
++       pkg-config \
++       libseccomp-dev \
++       wget \
++       curl \
++       xz-utils \
++       zlib1g \
++       expat \
++       perl \
++       libsqlite3-0 \
++    && apt-get clean \
++    && rm -rf /var/lib/apt/lists/*
++
++# copy main binary to /main
++COPY main /main
++# copy initial env
++COPY env /env
++
++# copy config file
++COPY conf/config.yaml /conf/config.yaml
++# copy python dependencies
++COPY dependencies/python-requirements.txt /dependencies/python-requirements.txt
++
++RUN chmod +x /main /env \
++    && pip3 install --no-cache-dir httpx==0.27.2 requests==2.32.3 jinja2==3.0.3 PySocks httpx[socks] -i https://gitlab.com/api/v4/projects/65746188/packages/pypi/simple \
++    && wget -O /opt/node-v20.11.1-linux-loong64.tar.xz https://github.com/loong64/node/releases/download/v20.11.1/node-v20.11.1-linux-loong64.tar.xz \
++    && tar -xvf /opt/node-v20.11.1-linux-loong64.tar.xz -C /opt \
++    && ln -s /opt/node-v20.11.1-linux-loong64/bin/node /usr/local/bin/node \
++    && rm -f /opt/node-v20.11.1-linux-loong64.tar.xz \
++    && /env \
++    && rm -f /env
++
++ENTRYPOINT ["/main"]
+diff --git a/internal/core/lib/seccomp_syscall_loong64.go b/internal/core/lib/seccomp_syscall_loong64.go
+new file mode 100644
+index 0000000..8e3e8a6
+--- /dev/null
++++ b/internal/core/lib/seccomp_syscall_loong64.go
+@@ -0,0 +1,9 @@
++//go:build linux && loong64
++
++package lib
++
++import "syscall"
++
++const (
++	SYS_SECCOMP = syscall.SYS_SECCOMP
++)
+diff --git a/internal/static/config_default_loong64.go b/internal/static/config_default_loong64.go
+new file mode 100644
+index 0000000..e053d36
+--- /dev/null
++++ b/internal/static/config_default_loong64.go
+@@ -0,0 +1,19 @@
++//go:build linux && loong64
++
++package static
++
++var DEFAULT_PYTHON_LIB_REQUIREMENTS = []string{
++	"/usr/local/lib/python3.10",
++	"/usr/lib/python3.10",
++	"/usr/lib/python3",
++	"/usr/lib/loongarch64-linux-gnu",
++	"/etc/ssl/certs/ca-certificates.crt",
++	"/etc/nsswitch.conf",
++	"/etc/hosts",
++	"/etc/resolv.conf",
++	"/run/systemd/resolve/stub-resolv.conf",
++	"/run/resolvconf/resolv.conf",
++	"/etc/localtime",
++	"/usr/share/zoneinfo",
++	"/etc/timezone",
++}
+diff --git a/internal/static/nodejs_syscall/syscalls_loong64.go b/internal/static/nodejs_syscall/syscalls_loong64.go
+new file mode 100644
+index 0000000..e771e39
+--- /dev/null
++++ b/internal/static/nodejs_syscall/syscalls_loong64.go
+@@ -0,0 +1,44 @@
++//go:build linux && loong64
++
++package nodejs_syscall
++
++import "syscall"
++
++var ALLOW_SYSCALLS = []int{
++	// file
++	syscall.SYS_CLOSE, syscall.SYS_WRITE, syscall.SYS_READ,
++	syscall.SYS_STATX, syscall.SYS_FCNTL,
++	syscall.SYS_READLINKAT, syscall.SYS_OPENAT,
++
++	// process
++	syscall.SYS_GETPID, syscall.SYS_TGKILL, syscall.SYS_FUTEX, syscall.SYS_IOCTL,
++	syscall.SYS_EXIT, syscall.SYS_EXIT_GROUP,
++	syscall.SYS_SET_ROBUST_LIST, syscall.SYS_NANOSLEEP, syscall.SYS_SCHED_GETAFFINITY,
++	syscall.SYS_SCHED_YIELD,
++
++	// memory
++	syscall.SYS_RT_SIGPROCMASK, syscall.SYS_SIGALTSTACK, syscall.SYS_RT_SIGACTION,
++	syscall.SYS_MMAP, syscall.SYS_MUNMAP, syscall.SYS_MADVISE, syscall.SYS_MPROTECT,
++	syscall.SYS_RT_SIGRETURN, syscall.SYS_BRK,
++
++	//user/group
++	syscall.SYS_SETUID, syscall.SYS_SETGID, syscall.SYS_GETTID,
++	syscall.SYS_GETUID, syscall.SYS_GETGID,
++
++	// epoll
++	syscall.SYS_EPOLL_CTL, syscall.SYS_EPOLL_PWAIT,
++}
++
++var ALLOW_ERROR_SYSCALLS = []int{
++	syscall.SYS_CLONE, 293,
++}
++
++var ALLOW_NETWORK_SYSCALLS = []int{
++	syscall.SYS_SOCKET, syscall.SYS_CONNECT, syscall.SYS_BIND, syscall.SYS_LISTEN, syscall.SYS_ACCEPT,
++	syscall.SYS_SENDTO, syscall.SYS_RECVFROM,
++	syscall.SYS_GETSOCKNAME, syscall.SYS_SETSOCKOPT, syscall.SYS_GETSOCKOPT,
++	syscall.SYS_SENDMMSG, syscall.SYS_RECVMSG,
++	syscall.SYS_GETPEERNAME, syscall.SYS_PPOLL, syscall.SYS_UNAME,
++	syscall.SYS_STATX, syscall.SYS_LSEEK,
++	syscall.SYS_FSTATFS,
++}
+diff --git a/internal/static/python_syscall/syscalls_loong64.go b/internal/static/python_syscall/syscalls_loong64.go
+new file mode 100644
+index 0000000..1b565c6
+--- /dev/null
++++ b/internal/static/python_syscall/syscalls_loong64.go
+@@ -0,0 +1,56 @@
++//go:build linux && loong64
++
++package python_syscall
++
++import (
++	"syscall"
++)
++
++const (
++	SYS_RSEQ = 293
++)
++
++var ALLOW_SYSCALLS = []int{
++	// file io
++	syscall.SYS_WRITE, syscall.SYS_CLOSE, syscall.SYS_OPENAT, syscall.SYS_READ, syscall.SYS_LSEEK, syscall.SYS_GETDENTS64,
++
++	// thread
++	syscall.SYS_FUTEX,
++
++	// memory
++	syscall.SYS_MMAP, syscall.SYS_BRK, syscall.SYS_MPROTECT, syscall.SYS_MUNMAP, syscall.SYS_RT_SIGRETURN, syscall.SYS_RT_SIGPROCMASK,
++	syscall.SYS_SIGALTSTACK, syscall.SYS_MREMAP,
++
++	// user/group
++	syscall.SYS_SETUID, syscall.SYS_SETGID, syscall.SYS_GETUID,
++
++	// process
++	syscall.SYS_GETPID, syscall.SYS_GETPPID, syscall.SYS_GETTID,
++	syscall.SYS_EXIT, syscall.SYS_EXIT_GROUP,
++	syscall.SYS_TGKILL, syscall.SYS_RT_SIGACTION,
++	syscall.SYS_IOCTL, syscall.SYS_SCHED_YIELD,
++	syscall.SYS_GET_ROBUST_LIST, syscall.SYS_SET_ROBUST_LIST,
++	SYS_RSEQ,
++
++	// time
++	syscall.SYS_EPOLL_CREATE1,
++	syscall.SYS_CLOCK_GETTIME, syscall.SYS_GETTIMEOFDAY, syscall.SYS_NANOSLEEP,
++	syscall.SYS_EPOLL_CTL, syscall.SYS_CLOCK_NANOSLEEP, syscall.SYS_PSELECT6,
++	syscall.SYS_TIMERFD_CREATE, syscall.SYS_TIMERFD_SETTIME, syscall.SYS_TIMERFD_GETTIME,
++
++	// get random
++	syscall.SYS_GETRANDOM,
++}
++
++var ALLOW_ERROR_SYSCALLS = []int{
++	syscall.SYS_CLONE,
++	syscall.SYS_MKDIRAT,
++}
++
++var ALLOW_NETWORK_SYSCALLS = []int{
++	syscall.SYS_SOCKET, syscall.SYS_CONNECT, syscall.SYS_BIND, syscall.SYS_LISTEN, syscall.SYS_ACCEPT, syscall.SYS_SENDTO,
++	syscall.SYS_RECVFROM, syscall.SYS_RECVMSG, syscall.SYS_GETSOCKOPT,
++	syscall.SYS_GETSOCKNAME, syscall.SYS_GETPEERNAME, syscall.SYS_SETSOCKOPT,
++	syscall.SYS_PPOLL, syscall.SYS_UNAME, syscall.SYS_SENDMMSG,
++	syscall.SYS_STATX, syscall.SYS_FSTATFS, syscall.SYS_EPOLL_PWAIT,
++}
+diff --git a/tests/integration_tests/conf/config.yaml b/tests/integration_tests/conf/config.yaml
+index f30b53d..690f9e6 100644
+--- a/tests/integration_tests/conf/config.yaml
++++ b/tests/integration_tests/conf/config.yaml
+@@ -12,6 +12,7 @@ python_lib_path:
+   - "/usr/lib/python3"
+   - "/usr/lib/x86_64-linux-gnu"
+   - "/usr/lib/aarch64-linux-gnu"
++  - "/usr/lib/loongarch64-linux-gnu"
+   - "/etc/ssl/certs/ca-certificates.crt"
+   - "/etc/nsswitch.conf"
+   - "/etc/hosts"
+-- 
+2.47.0.windows.2
+
