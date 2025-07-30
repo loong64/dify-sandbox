@@ -1,4 +1,4 @@
-From 717570876619672f2d5c7fbbf7a0b891cd9c2976 Mon Sep 17 00:00:00 2001
+From 88534f4bf3e3d23768b0a2f169197b7321dafc68 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?=E5=90=B4=E5=B0=8F=E7=99=BD?= <296015668@qq.com>
 Date: Tue, 29 Jul 2025 10:47:32 +0800
 Subject: [PATCH] feat: add loongarch64 platform support
@@ -10,13 +10,13 @@ Signed-off-by: 吴小白 <296015668@qq.com>
 ---
  build/build_loong64.sh                        | 12 ++++
  docker/loong64-test/dockerfile                | 63 +++++++++++++++++++
- docker/loong64/dockerfile                     | 38 +++++++++++
+ docker/loong64/dockerfile                     | 41 ++++++++++++
  internal/core/lib/seccomp_syscall_loong64.go  |  9 +++
  internal/static/config_default_loong64.go     | 19 ++++++
  .../static/nodejs_syscall/syscalls_loong64.go | 44 +++++++++++++
  .../static/python_syscall/syscalls_loong64.go | 56 +++++++++++++++++
  tests/integration_tests/conf/config.yaml      |  1 +
- 8 files changed, 242 insertions(+)
+ 8 files changed, 245 insertions(+)
  create mode 100644 build/build_loong64.sh
  create mode 100644 docker/loong64-test/dockerfile
  create mode 100644 docker/loong64/dockerfile
@@ -114,10 +114,10 @@ index 0000000..b02b154
 +RUN go test -v ./tests/integration_tests/...
 diff --git a/docker/loong64/dockerfile b/docker/loong64/dockerfile
 new file mode 100644
-index 0000000..9f0babd
+index 0000000..9b2360d
 --- /dev/null
 +++ b/docker/loong64/dockerfile
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,41 @@
 +FROM ghcr.io/loong64/python:3.10-slim-trixie
 +
 +# if you located in China, you can use aliyun mirror to speed up
@@ -146,8 +146,11 @@ index 0000000..9f0babd
 +# copy python dependencies
 +COPY dependencies/python-requirements.txt /dependencies/python-requirements.txt
 +
++ARG PIP_EXTRA_INDEX_URL
++
 +RUN chmod +x /main /env \
-+    && pip3 install --no-cache-dir httpx==0.27.2 requests==2.32.3 jinja2==3.0.3 PySocks httpx[socks] -i https://gitlab.com/api/v4/projects/65746188/packages/pypi/simple \
++    && pip3 install --no-cache-dir --upgrade pip \
++    && pip3 install --no-cache-dir httpx==0.27.2 requests==2.32.3 jinja2==3.0.3 PySocks httpx[socks] \
 +    && wget -O /opt/node-v20.11.1-linux-loong64.tar.xz https://github.com/loong64/node/releases/download/v20.11.1/node-v20.11.1-linux-loong64.tar.xz \
 +    && tar -xvf /opt/node-v20.11.1-linux-loong64.tar.xz -C /opt \
 +    && ln -s /opt/node-v20.11.1-linux-loong64/bin/node /usr/local/bin/node \
