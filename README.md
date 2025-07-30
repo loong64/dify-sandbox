@@ -25,4 +25,4 @@ Refer to the [FAQ document](FAQ.md)
 
 
 ## Workflow
-![workflow](workflow.png)
+![workflow](https://github.com/langgenius/dify-sandbox/raw/main/workflow.png)
